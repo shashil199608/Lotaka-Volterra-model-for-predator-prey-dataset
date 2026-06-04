@@ -1,0 +1,66 @@
+# GP-Assisted ABC SMC for the Lotka–Volterra Model
+
+This repository contains the Python implementation used in the Master's thesis:
+
+"Predictive Distance Weighting Strategies in a Gaussian Process-Assisted ABC SMC Framework for Simulation-Based Inference"
+
+## Description
+
+The implementation combines Approximate Bayesian Computation with Sequential Monte Carlo (ABC SMC) and a Gaussian Process (GP) surrogate model to improve computational efficiency in likelihood-free Bayesian inference.
+
+The framework evaluates four weighting strategies:
+
+- Traditional weighting
+- Mean-Based weighting
+- Probabilistic weighting
+- Annealing weighting
+
+The methodology is applied to a three-dimensional Lotka–Volterra predator–prey model using historical lynx–hare population data.
+
+## Features
+
+- Gaussian Process surrogate modelling of discrepancy values
+- Adaptive ABC SMC threshold selection
+- Multiple surrogate-assisted weighting strategies
+- Posterior parameter estimation
+- Acceptance rate diagnostics
+- Threshold evolution analysis
+- Computational cost analysis
+- Weighted posterior contour visualizations
+
+## Model Parameters
+
+The inferred parameters are:
+
+- a : predation rate
+- d : predator mortality rate
+- r : prey growth rate
+
+while the remaining parameters are fixed.
+
+## Outputs
+
+The code generates:
+
+- Acceptance rate plots
+- Threshold evolution plots
+- Cumulative simulation plots
+- Weighted posterior contour plots
+- Posterior summary statistics
+
+## Requirements
+
+Python 3.x
+
+Packages:
+
+- numpy
+- pandas
+- scipy
+- matplotlib
+- seaborn
+- scikit-learn
+
+## Citation
+
+This code was developed as part of a Master's thesis at Tampere University.
