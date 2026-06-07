@@ -64,3 +64,592 @@ Packages:
 ## Citation
 
 This code was developed as part of a Master's thesis at Tampere University.
+
+# ============================================================
+# GP-Assisted SMC-ABC for Lynx-Hare Predator-Prey Model
+# Relevant plots only:
+# 1. Acceptance Rate
+# 2. Threshold epsilon
+# 3. Cumulative Simulations
+# 4. Weighted Posterior Contours with ONE contour line
+# ============================================================
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from scipy.integrate import solve_ivp
+from scipy.stats import norm
+
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+
+# ============================================================
+# 1. LOAD DATA & SETTINGS
+# ============================================================
+
+np.random.seed(42)
+
+url = 'http://people.whitman.edu/~hundledr/courses/M250F03/LynxHare.txt'
+
+df = pd.read_csv(
+    url,
+    sep=r"\s+",
+    header=None,
+    index_col=0
+)
+
+df50 = df.iloc[:50].copy()
+
+years = df50.index.values.astype(float)
+
+hare_obs = df50[1].values
+lynx_obs = df50[2].values
+
+colors = {
+    'Traditional': '#1f77b4',
+    'Mean-Based': '#ff7f0e',
+    'Probabilistic': '#2ca02c',
+    'Annealing': '#d62728'
+}
+
+# ============================================================
+# 2. MODEL CONSTANTS
+# ============================================================
+
+FIXED_b = 0.6
+FIXED_c = 50.0
+FIXED_k = 125.0
+
+H0 = hare_obs[0]
+L0 = lynx_obs[0]
+
+PRIOR_BOUNDS = {
+    "a": (0.5, 5.0),
+    "d": (0.1, 1.2),
+    "r": (0.5, 3.5)
+}
+
+PARAM_NAMES = ["a", "d", "r"]
+
+N_PARTICLES = 1000
+N_ITERATIONS = 5
+
+# ============================================================
+# 3. LOTKA-VOLTERRA ODE
+# ============================================================
+
+def lv_ode(t, z, a, d, r):
+
+    h, l = z
+
+    h = max(h, 1e-3)
+    l = max(l, 1e-3)
+
+    dhdt = (
+        r * h * (1 - h / FIXED_k)
+        -
+        (a * h * l) / (FIXED_c + h)
+    )
+
+    dldt = (
+        (FIXED_b * a * h * l) / (FIXED_c + h)
+        -
+        d * l
+    )
+
+    return [dhdt, dldt]
+
+# ============================================================
+# 4. DISTANCE FUNCTION
+# ============================================================
+
+def distance(theta):
+
+    a, d, r = theta
+
+    sol = solve_ivp(
+        lv_ode,
+        (years[0], years[-1]),
+        [H0, L0],
+        t_eval=years,
+        args=(a, d, r)
+    )
+
+    if not sol.success:
+        return 1e6
+
+    sim = sol.y.T
+
+    summary_obs = np.array([
+        np.mean(hare_obs),
+        np.mean(lynx_obs),
+        np.std(hare_obs)
+    ])
+
+    summary_sim = np.array([
+        np.mean(sim[:, 0]),
+        np.mean(sim[:, 1]),
+        np.std(sim[:, 0])
+    ])
+
+    return np.linalg.norm(summary_obs - summary_sim)
+
+# ============================================================
+# 5. PRIOR CHECK
+# ============================================================
+
+def inside_prior(theta):
+
+    return all(
+        PRIOR_BOUNDS[k][0] <= theta[i] <= PRIOR_BOUNDS[k][1]
+        for i, k in enumerate(PARAM_NAMES)
+    )
+
+# ============================================================
+# 6. WEIGHTED QUANTILE
+# ============================================================
+
+def weighted_quantile(values, quantiles, weights):
+
+    values = np.asarray(values)
+    quantiles = np.asarray(quantiles)
+    weights = np.asarray(weights)
+
+    sorter = np.argsort(values)
+
+    values = values[sorter]
+    weights = weights[sorter]
+
+    cumulative_weights = np.cumsum(weights)
+    cumulative_weights /= cumulative_weights[-1]
+
+    return np.interp(
+        quantiles,
+        cumulative_weights,
+        values
+    )
+
+# ============================================================
+# 7. SMC-ABC ENGINE
+# ============================================================
+
+def run_smc(method,
+            n_particles=N_PARTICLES,
+            n_iterations=N_ITERATIONS):
+
+    particles = np.column_stack([
+        np.random.uniform(
+            *PRIOR_BOUNDS[k],
+            n_particles
+        )
+        for k in PARAM_NAMES
+    ])
+
+    distances = np.array([
+        distance(p)
+        for p in particles
+    ])
+
+    weights = np.ones(n_particles) / n_particles
+
+    beta_schedule = np.linspace(
+        0.2,
+        1.0,
+        n_iterations
+    )
+
+    history = {
+        "ar": [],
+        "eps": [],
+        "cum_sims": [],
+        "final_particles": None,
+        "final_weights": None
+    }
+
+    total_sims = n_particles
+
+    for t in range(n_iterations):
+
+        epsilon = (
+            np.inf
+            if t == 0
+            else np.percentile(distances, 10)
+        )
+
+        gp = GaussianProcessRegressor(
+            kernel=C(1.0) * RBF([1.0, 1.0, 1.0]),
+            alpha=0.1,
+            normalize_y=True
+        )
+
+        gp.fit(particles, distances)
+
+        new_particles = []
+        gp_weights = []
+        new_distances = []
+
+        proposals = 0
+
+        cov = (
+            np.cov(
+                particles,
+                rowvar=False
+            )
+            +
+            1e-5 * np.eye(3)
+        )
+
+        inv_cov = np.linalg.inv(cov)
+        det_cov = np.linalg.det(cov)
+
+        while len(new_particles) < n_particles:
+
+            proposals += 1
+
+            idx = np.random.choice(
+                n_particles,
+                p=weights
+            )
+
+            proposal = np.random.multivariate_normal(
+                mean=particles[idx],
+                cov=cov
+            )
+
+            if inside_prior(proposal):
+
+                d_val = distance(proposal)
+                total_sims += 1
+
+                if d_val <= epsilon:
+
+                    new_particles.append(proposal)
+                    new_distances.append(d_val)
+
+                    m, s = gp.predict(
+                        proposal.reshape(1, -1),
+                        return_std=True
+                    )
+
+                    m = float(m[0])
+                    s = max(float(s[0]), 1e-9)
+
+                    if method == "Traditional":
+
+                        gp_weights.append(1.0)
+
+                    elif method == "Mean-Based":
+
+                        gp_weights.append(
+                            np.exp(-max(m, 0))
+                        )
+
+                    elif method == "Probabilistic":
+
+                        gp_weights.append(
+                            norm.cdf(
+                                epsilon if epsilon != np.inf else 1e6,
+                                loc=m,
+                                scale=s
+                            )
+                        )
+
+                    elif method == "Annealing":
+
+                        gp_weights.append(
+                            np.exp(
+                                -beta_schedule[t] * max(m, 0)
+                            )
+                        )
+
+        history["ar"].append(
+            n_particles / proposals
+        )
+
+        history["eps"].append(
+            epsilon if epsilon != np.inf else np.max(distances)
+        )
+
+        history["cum_sims"].append(total_sims)
+
+        # ====================================================
+        # VECTORIZED IMPORTANCE WEIGHT UPDATE
+        # ====================================================
+
+        new_particles = np.array(new_particles)
+        new_distances = np.array(new_distances)
+        gp_weights = np.array(gp_weights)
+
+        diff = (
+            new_particles[:, None, :]
+            -
+            particles[None, :, :]
+        )
+
+        quad = np.einsum(
+            'ijk,kl,ijl->ij',
+            diff,
+            inv_cov,
+            diff
+        )
+
+        norm_const = 1.0 / np.sqrt(
+            (2 * np.pi) ** 3 * det_cov
+        )
+
+        kernel_vals = norm_const * np.exp(-0.5 * quad)
+
+        denom = kernel_vals @ weights
+
+        new_weights = gp_weights / (denom + 1e-15)
+
+        if np.sum(new_weights) == 0:
+            new_weights = np.ones(n_particles)
+
+        weights = new_weights / np.sum(new_weights)
+
+        particles = new_particles
+        distances = new_distances
+
+    history["final_particles"] = particles
+    history["final_weights"] = weights
+
+    return history
+
+# ============================================================
+# 8. RUN METHODS
+# ============================================================
+
+methods = [
+    'Traditional',
+    'Mean-Based',
+    'Probabilistic',
+    'Annealing'
+]
+
+print("Running simulations...")
+
+results = {
+    m: run_smc(m)
+    for m in methods
+}
+
+# ============================================================
+# 9. RELEVANT DIAGNOSTIC PLOTS
+# ============================================================
+
+fig_diag, axes = plt.subplots(
+    1,
+    3,
+    figsize=(20, 5)
+)
+
+iterations = np.arange(
+    1,
+    N_ITERATIONS + 1
+)
+
+for method, color in colors.items():
+
+    axes[0].plot(
+        iterations,
+        results[method]["ar"],
+        'o-',
+        color=color,
+        lw=2,
+        label=method
+    )
+
+    axes[1].plot(
+        iterations,
+        results[method]["eps"],
+        's--',
+        color=color,
+        lw=2,
+        label=method
+    )
+
+    axes[2].plot(
+        iterations,
+        results[method]["cum_sims"],
+        '^-',
+        color=color,
+        lw=2,
+        label=method
+    )
+
+axes[0].set_title(
+    'Acceptance Rate vs Iteration',
+    fontweight='bold'
+)
+
+axes[1].set_title(
+    r'Threshold ($\epsilon$) vs Iteration',
+    fontweight='bold'
+)
+
+axes[2].set_title(
+    'Cumulative Simulations vs Iteration',
+    fontweight='bold'
+)
+
+axes[0].set_xlabel('Iteration Step')
+axes[1].set_xlabel('Iteration Step')
+axes[2].set_xlabel('Iteration Step')
+
+axes[0].set_ylabel('Acceptance Rate')
+axes[1].set_ylabel(r'$\epsilon$')
+axes[2].set_ylabel('Simulations')
+
+axes[2].set_yscale('log')
+
+for ax in axes:
+
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# 10. WEIGHTED POSTERIOR CONTOUR PLOTS
+# ONE CONTOUR LINE ONLY
+# ============================================================
+
+fig, axes = plt.subplots(
+    1,
+    3,
+    figsize=(22, 7)
+)
+
+param_pairs = [
+    (0, 1),
+    (0, 2),
+    (1, 2)
+]
+
+pair_names = [
+    ("a", "d"),
+    ("a", "r"),
+    ("d", "r")
+]
+
+for ax, (i, j), (ni, nj) in zip(
+    axes,
+    param_pairs,
+    pair_names
+):
+
+    for method, color in colors.items():
+
+        pts = results[method]["final_particles"]
+        w = results[method]["final_weights"]
+
+        sns.kdeplot(
+            x=pts[:, i],
+            y=pts[:, j],
+            weights=w,
+            ax=ax,
+            levels=1,
+            color=color,
+            linewidths=2,
+            fill=False
+        )
+
+        ax.plot(
+            [],
+            [],
+            color=color,
+            linewidth=2,
+            label=method
+        )
+
+    ax.set_title(
+        f'Weighted Posterior Contour: {ni} vs {nj}',
+        fontweight='bold'
+    )
+
+    ax.set_xlabel(ni, fontweight='bold')
+    ax.set_ylabel(nj, fontweight='bold')
+
+    ax.grid(True, alpha=0.2)
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# 11. SUMMARY TABLE
+# ============================================================
+
+summary = []
+
+for method in methods:
+
+    pts = results[method]["final_particles"]
+    w = results[method]["final_weights"]
+
+    posterior_mean = np.average(
+        pts,
+        axis=0,
+        weights=w
+    )
+
+    posterior_var = np.average(
+        (pts - posterior_mean) ** 2,
+        axis=0,
+        weights=w
+    )
+
+    posterior_sd = np.sqrt(posterior_var)
+
+    a_lower, a_upper = weighted_quantile(
+        pts[:, 0],
+        [0.025, 0.975],
+        w
+    )
+
+    d_lower, d_upper = weighted_quantile(
+        pts[:, 1],
+        [0.025, 0.975],
+        w
+    )
+
+    r_lower, r_upper = weighted_quantile(
+        pts[:, 2],
+        [0.025, 0.975],
+        w
+    )
+
+    summary.append({
+
+        "Method": method,
+
+        "a Weighted Mean": posterior_mean[0],
+        "d Weighted Mean": posterior_mean[1],
+        "r Weighted Mean": posterior_mean[2],
+
+        "a 95% CI Lower": a_lower,
+        "a 95% CI Upper": a_upper,
+
+        "d 95% CI Lower": d_lower,
+        "d 95% CI Upper": d_upper,
+
+        "r 95% CI Lower": r_lower,
+        "r 95% CI Upper": r_upper,
+
+        "a Posterior SD": posterior_sd[0],
+        "d Posterior SD": posterior_sd[1],
+        "r Posterior SD": posterior_sd[2],
+
+        "Acceptance Rate": results[method]["ar"][-1],
+
+        "Total Simulations": results[method]["cum_sims"][-1]
+    })
+
+summary_df = pd.DataFrame(summary)
+
+print("\nWeighted Posterior Summary:\n")
+print(summary_df.round(4))
